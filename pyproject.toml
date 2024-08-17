@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "florence_tool"
+version = "0.1.0"
+description = "A Python tool for running Florence-2 tasks on images."
+authors = [
+    { name="hlky", email="hlky@hlky.ac" }
+]
+readme = "README.md"
+requires-python = ">=3.7"
+license = { file="LICENSE" }
+
+[project.urls]
+"Homepage" = "https://github.com/bigdata-pw/florence_tool"
+
+[tool.setuptools]
+packages = ["florence_tool"]
+
+[tool.setuptools.package-data]
+florence_tool = ["modeling/*"]
+
+[project.scripts]
+florence-tool = "florence_tool.cli:cli"
