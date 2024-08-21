@@ -62,6 +62,7 @@ florence-tool run [OPTIONS]
 - `--overwrite`: Flag to overwrite existing files. If not specified, appends/updates the files.
 - `--image-extensions`: Comma-separated list of image file extensions to include (e.g., `"jpg,png,jpeg"`). Default is `"jpg,png"`.
 - `--batch-size`: Number of images to process in a batch. Default is `1`.
+- `--num-workers`: Number of Dataloader workers. Default is `4`, overriden to `0` on Windows.
 
 ### Examples
 

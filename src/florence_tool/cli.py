@@ -86,6 +86,7 @@ def cli():
     help="Comma-separated list of image file extensions to include, e.g., 'jpg,png,jpeg'.",
 )
 @click.option("--batch-size", type=int, default=1, help="Batch size.")
+@click.option("--num-workers", type=int, default=4, help="Dataloader workers.")
 def run(
     hf_hub_or_path: str,
     device: str,
@@ -103,6 +104,7 @@ def run(
     overwrite: bool,
     image_extensions: str,
     batch_size: int,
+    num_workers: int,
 ):
     from florence_tool import FlorenceTool
 
@@ -140,6 +142,7 @@ def run(
             overwrite=overwrite,
             image_extensions=extensions,
             batch_size=batch_size,
+            num_workers=num_workers,
         )
         click.echo(
             f"Processed images in folder {folder}. Results saved to {output_dir}."

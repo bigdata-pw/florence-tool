@@ -11,6 +11,11 @@ from typing import Any, Dict, Literal, Optional, Union, List
 from tqdm import tqdm
 import logging
 from concurrent.futures import ThreadPoolExecutor, Future
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+import sys
+
+IS_WINDOWS = sys.platform == "win32"
 
 from .modeling import Florence2ForConditionalGeneration, Florence2Processor
 
@@ -64,21 +69,98 @@ DTYPE_MAP = {
 }
 
 
+class FlorenceDataset(Dataset):
+    def __init__(
+        self,
+        images: List[Union[str, pathlib.Path]],
+        task_prompt: TASK_TYPE,
+        device: Union[str, torch.device],
+        dtype: Union[str, torch.dtype],
+        processor: Florence2Processor,
+        text_inputs: Optional[Union[str, List[str]]] = None,
+        convert_rgb: bool = True,
+        transform=None,
+    ):
+        self.images = images
+        self.tasks = [task_prompt] * len(images)
+        if isinstance(text_inputs, str):
+            self.text_inputs = [text_inputs] * len(images)
+        elif isinstance(text_inputs, list):
+            self.text_inputs = text_inputs
+        else:
+            self.text_inputs = [None] * len(images)
+        self.processor = processor
+        self.device = device
+        self.dtype = dtype
+        self.transform = transform
+        self.convert_rgb = convert_rgb
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        image = Image.open(self.images[idx])
+        if self.convert_rgb:
+            image = image.convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+
+        task_prompt = self.tasks[idx]
+        text_input = self.text_inputs[idx]
+        prompt = task_prompt
+        if text_input is not None:
+            prompt = task_prompt + text_input
+
+        model_inputs = self.processor(text=prompt, images=image, return_tensors="pt")
+        model_inputs = {
+            "input_ids": model_inputs["input_ids"],
+            "pixel_values": model_inputs["pixel_values"],
+            "width": image.width,
+            "height": image.height,
+            "path": self.images[idx],
+        }
+        return model_inputs
+
+    @staticmethod
+    def collate_fn(batch):
+        batch_inputs = {
+            "input_ids": [],
+            "pixel_values": [],
+            "width": [],
+            "height": [],
+            "path": [],
+        }
+        for item in batch:
+            for key in batch_inputs:
+                batch_inputs[key].append(item[key])
+        batch_inputs = {
+            key: (
+                torch.cat(value, dim=0) if isinstance(value[0], torch.Tensor) else value
+            )
+            for key, value in batch_inputs.items()
+        }
+        return batch_inputs
+
+
 class FlorenceTool:
     def __init__(
         self,
         hf_hub_or_path: str,
         device: Union[str, torch.device],
         dtype: Union[str, torch.dtype],
-        max_workers: int = 4,
+        max_workers: int = 8,
     ) -> None:
         self.set_device(device)
         self.set_dtype(dtype)
         self.hf_hub_or_path = hf_hub_or_path
         self.model = None
         self.processor = None
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.save_executor = ThreadPoolExecutor(max_workers=max_workers)
         self.save_futures: List[Future] = []
+        self.post_process_executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.post_process_futures: List[Future] = []
+        self.dataloader = None
+        self.dataset = None
         logging.info(
             f"Initialized\n- hf_hub_or_path: {self.hf_hub_or_path}\n- device: {self.device}\n- dtype: {self.dtype}"
         )
@@ -112,6 +194,28 @@ class FlorenceTool:
         )
         logging.info("Model loaded")
 
+    def unload_model(self):
+        self.wait_for_post_process()
+        self.wait_for_save()
+        self.model = None
+        self.processor = None
+
+    def __del__(self):
+        self.wait_for_post_process()
+        self.wait_for_save()
+
+    def wait_for_post_process(self):
+        if len(self.post_process_futures) == 0:
+            return
+        logging.info("Waiting for post processing to complete.")
+
+        for future in self.post_process_futures:
+            future.result()
+
+        self.post_process_executor.shutdown(wait=True)
+        self.post_process_futures.clear()
+        logging.info("Post processing complete.")
+
     def wait_for_save(self):
         if len(self.save_futures) == 0:
             return
@@ -120,36 +224,60 @@ class FlorenceTool:
         for future in self.save_futures:
             future.result()
 
-        self.executor.shutdown(wait=True)
+        self.save_executor.shutdown(wait=True)
         self.save_futures.clear()
         logging.info("Saving complete.")
 
-    def unload_model(self):
-        self.wait_for_save()
-        self.model = None
-        self.processor = None
-
-    def __del__(self):
-        self.wait_for_save()
-
-    def run(
+    def get_data_loader(
         self,
-        images: Union[Image.Image, List[Image.Image]],
+        image_paths: List[Union[str, pathlib.Path]],
+        task_prompt: TASK_TYPE,
+        text_inputs: Optional[Union[str, List[str]]] = None,
+        batch_size: int = 4,
+        num_workers: int = 4,
+        convert_rgb: bool = True,
+    ):
+        if IS_WINDOWS:
+            num_workers = 0
+            logging.info("Windows environment: Overriding `num_workers` to 0.")
+        logging.info("Creating FlorenceDataset.")
+        self.dataset = FlorenceDataset(
+            images=image_paths,
+            task_prompt=task_prompt,
+            device=self.device,
+            dtype=self.dtype,
+            processor=self.processor,
+            text_inputs=text_inputs,
+            convert_rgb=convert_rgb,
+        )
+        logging.info(f"FlorenceDataset created - found {len(self.dataset)} images.")
+        logging.info("Creating DataLoader.")
+        self.dataloader = DataLoader(
+            self.dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
+            collate_fn=FlorenceDataset.collate_fn,
+        )
+        logging.info("DataLoader created.")
+
+    def run_dataloader(
+        self,
+        images: List[Union[str, pathlib.Path]],
         task_prompt: TASK_TYPE,
         text_inputs: Optional[Union[str, List[str]]] = None,
         max_new_tokens: Optional[int] = 1024,
         num_beams: Optional[int] = 3,
+        batch_size: int = 4,
+        num_workers: int = 4,
+        save_result: bool = True,
+        output_format: OUTPUT_TYPE = "json",
+        output_dir: Optional[Union[str, pathlib.Path]] = None,
+        suffix: Optional[str] = None,
+        overwrite: bool = True,
+        convert_rgb: bool = True,
     ):
-        """
-        Run the model on one or more images.
-
-        :param images: A single PIL image or a list of PIL images.
-        :param task_prompt: The task prompt.
-        :param text_inputs: A single text input or a list of text inputs. Must match the length of images if a list.
-        :param max_new_tokens: Maximum number of new tokens to generate.
-        :param num_beams: Number of beams for beam search.
-        :return: A single result or a list of results.
-        """
         if self.model is None or self.processor is None:
             logging.error("Call `load_model` before `run`.")
             return
@@ -160,41 +288,87 @@ class FlorenceTool:
         if isinstance(images, Image.Image):
             images = [images]
 
-        if text_inputs is None:
-            prompts = [task_prompt] * len(images)
-        elif isinstance(text_inputs, str):
-            prompts = [task_prompt + text_inputs] * len(images)
-        else:
-            assert len(images) == len(
-                text_inputs
-            ), "Length of text_inputs must match the number of images."
-            prompts = [task_prompt + text_input for text_input in text_inputs]
+        self.get_data_loader(
+            image_paths=images,
+            task_prompt=task_prompt,
+            text_inputs=text_inputs,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            convert_rgb=convert_rgb,
+        )
 
-        inputs = self.processor(
-            text=prompts, images=images, return_tensors="pt", padding=True
-        ).to(self.device, self.dtype)
+        with tqdm(total=len(self.dataset)) as pbar:
+            for batch in self.dataloader:
+                generated_ids = self.model.generate(
+                    input_ids=batch["input_ids"].to(self.device),
+                    pixel_values=batch["pixel_values"].to(self.device, self.dtype),
+                    max_new_tokens=max_new_tokens,
+                    num_beams=num_beams,
+                )
+                future = self.post_process_executor.submit(
+                    self.post_process_batch,
+                    generated_ids=generated_ids,
+                    task_prompt=task_prompt,
+                    width=batch["width"],
+                    height=batch["height"],
+                    image_paths=batch["path"],
+                    save_result=save_result,
+                    output_format=output_format,
+                    output_dir=output_dir,
+                    suffix=suffix,
+                    overwrite=overwrite,
+                )
+                self.post_process_futures.append(future)
+                pbar.update(len(batch["path"]))
+
+    def run(
+        self,
+        image: Image.Image,
+        task_prompt: TASK_TYPE,
+        text_input: Optional[str] = None,
+        max_new_tokens: Optional[int] = 1024,
+        num_beams: Optional[int] = 3,
+    ):
+        """
+        Run the model on one image.
+
+        :param images: A single PIL image.
+        :param task_prompt: The task prompt.
+        :param text_inputs: A single text input.
+        :param max_new_tokens: Maximum number of new tokens to generate.
+        :param num_beams: Number of beams for beam search.
+        :return: A single result.
+        """
+        if self.model is None or self.processor is None:
+            logging.error("Call `load_model` before `run`.")
+            return
+        assert (
+            task_prompt in TASK_TYPES
+        ), f"{task_prompt} is not supported. Expected one of {TASK_TYPES}."
+
+        prompt = task_prompt
+        if text_input is not None:
+            prompt = task_prompt + text_input
+
+        inputs = self.processor(text=prompt, images=image, return_tensors="pt")
 
         generated_ids = self.model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
+            input_ids=inputs["input_ids"].to(self.device),
+            pixel_values=inputs["pixel_values"].to(self.device, self.dtype),
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
         )
 
-        generated_texts = self.processor.batch_decode(
+        generated_text = self.processor.batch_decode(
             generated_ids, skip_special_tokens=False
+        )[0]
+
+        parsed_answer = self.processor.post_process_generation(
+            generated_text,
+            task=task_prompt,
+            image_size=(image.width, image.height),
         )
-        parsed_answers = []
-
-        for i, generated_text in enumerate(generated_texts):
-            parsed_answer = self.processor.post_process_generation(
-                generated_text,
-                task=task_prompt,
-                image_size=(images[i].width, images[i].height),
-            )
-            parsed_answers.append(parsed_answer)
-
-        return parsed_answers
+        return parsed_answer
 
     def file(
         self,
@@ -204,7 +378,7 @@ class FlorenceTool:
         max_new_tokens: Optional[int] = 1024,
         num_beams: Optional[int] = 3,
         convert_rgb: bool = True,
-        save_result: bool = False,
+        save_result: bool = True,
         output_format: OUTPUT_TYPE = "json",
         output_dir: Optional[Union[str, pathlib.Path]] = None,
         suffix: Optional[str] = None,
@@ -222,7 +396,7 @@ class FlorenceTool:
             text_input=text_input,
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
-        )[0]
+        )
         if save_result:
             self.save_to_file(
                 result=result,
@@ -251,6 +425,7 @@ class FlorenceTool:
         image_extensions: List[str] = ["jpg", "png"],
         suffix: Optional[str] = None,
         overwrite: bool = True,
+        num_workers: int = 4,
     ):
         if isinstance(folder_path, str):
             folder_path = pathlib.Path(folder_path)
@@ -262,47 +437,22 @@ class FlorenceTool:
                 image_paths.extend(folder_path.rglob(f"*.{ext}"))
             else:
                 image_paths.extend(folder_path.glob(f"*.{ext}"))
-        results = []
 
-        for i in tqdm(range(0, len(image_paths), batch_size)):
-            batch_paths = image_paths[i : i + batch_size]
-            images = []
-            for path in batch_paths:
-                try:
-                    image = Image.open(path)
-                    if convert_rgb:
-                        image = image.convert("RGB")
-                    images.append(image)
-                except Exception as e:
-                    logging.error(f"Error opening {path}: {e}")
-
-            if not images:
-                continue
-
-            result_batch = self.run(
-                images=images,
-                task_prompt=task,
-                text_inputs=[text_input] * len(images) if text_input else None,
-                max_new_tokens=max_new_tokens,
-                num_beams=num_beams,
-            )
-            results.extend(result_batch)
-
-            if save_result:
-                for image, path, result in zip(images, batch_paths, result_batch):
-                    future = self.executor.submit(
-                        self.save_to_file,
-                        result=result,
-                        image_path=path,
-                        task=task,
-                        output_dir=output_dir,
-                        output_format=output_format,
-                        suffix=suffix,
-                        overwrite=overwrite,
-                    )
-                    self.save_futures.append(future)
-
-        return results
+        self.run_dataloader(
+            images=image_paths,
+            task_prompt=task,
+            text_inputs=text_input,
+            max_new_tokens=max_new_tokens,
+            num_beams=num_beams,
+            batch_size=batch_size,
+            save_result=save_result,
+            output_format=output_format,
+            output_dir=output_dir,
+            suffix=suffix,
+            overwrite=overwrite,
+            convert_rgb=convert_rgb,
+            num_workers=num_workers,
+        )
 
     def save_to_file(
         self,
@@ -326,7 +476,10 @@ class FlorenceTool:
         if suffix is None:
             suffix = task.strip("<>").lower()
 
-        output_file = output_dir / f"{image_path.stem}_{suffix}.{output_format}"
+        output_file = (
+            output_dir
+            / f"{image_path.stem}-{image_path.suffix}_{suffix}.{output_format}"
+        )
 
         if output_format == "json":
             if output_file.exists() and not overwrite:
@@ -362,3 +515,41 @@ class FlorenceTool:
                 f.write(result[task] + "\n")
 
         logging.debug(f"Saved result to {output_file}")
+
+    def post_process_batch(
+        self,
+        generated_ids: torch.Tensor,
+        task_prompt: TASK_TYPE,
+        width: List[int],
+        height: List[int],
+        image_paths: List[Union[str, pathlib.Path]],
+        save_result: bool = True,
+        output_format: OUTPUT_TYPE = "json",
+        output_dir: Optional[Union[str, pathlib.Path]] = None,
+        suffix: Optional[str] = None,
+        overwrite: bool = True,
+    ):
+        generated_texts = self.processor.batch_decode(
+            generated_ids, skip_special_tokens=False
+        )
+        parsed_answers = []
+        for i, generated_text in enumerate(generated_texts):
+            parsed_answer = self.processor.post_process_generation(
+                generated_text,
+                task=task_prompt,
+                image_size=(width[i], height[i]),
+            )
+            if save_result:
+                future = self.save_executor.submit(
+                    self.save_to_file,
+                    result=parsed_answer,
+                    image_path=image_paths[i],
+                    task=task_prompt,
+                    output_dir=output_dir,
+                    output_format=output_format,
+                    suffix=suffix,
+                    overwrite=overwrite,
+                )
+                self.save_futures.append(future)
+            parsed_answers.append(parsed_answer)
+        return parsed_answers
