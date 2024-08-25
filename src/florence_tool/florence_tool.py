@@ -11,9 +11,10 @@ from typing import Any, Dict, Literal, Optional, Union, List
 from tqdm import tqdm
 import logging
 from concurrent.futures import ThreadPoolExecutor, Future
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, IterableDataset
 from PIL import Image
 import sys
+import webdataset as wds
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -121,25 +122,94 @@ class FlorenceDataset(Dataset):
         }
         return model_inputs
 
-    @staticmethod
-    def collate_fn(batch):
-        batch_inputs = {
-            "input_ids": [],
-            "pixel_values": [],
-            "width": [],
-            "height": [],
-            "path": [],
+
+def collate_fn(batch):
+    batch_inputs = {
+        "input_ids": [],
+        "pixel_values": [],
+        "width": [],
+        "height": [],
+        "path": [],
+    }
+    for item in batch:
+        for key in batch_inputs:
+            batch_inputs[key].append(item[key])
+    batch_inputs = {
+        key: (torch.cat(value, dim=0) if isinstance(value[0], torch.Tensor) else value)
+        for key, value in batch_inputs.items()
+    }
+    return batch_inputs
+
+
+class FlorenceWebDataset(FlorenceDataset):
+    def __init__(
+        self,
+        webdataset_uri: str,
+        task_prompt: TASK_TYPE,
+        device: Union[str, torch.device],
+        dtype: Union[str, torch.dtype],
+        processor: Florence2Processor,
+        text_inputs: Optional[str] = None,
+        convert_rgb: bool = True,
+        transform=None,
+        image_key: str = "jpg",
+    ):
+        if text_inputs:
+            assert isinstance(
+                text_inputs, str
+            ), "WebDataset supports `str` for `text_inputs`."
+        self.dataset: wds.WebDataset = wds.WebDataset(webdataset_uri).decode("pil")
+        self.task_prompt = task_prompt
+        self.text_inputs = text_inputs
+        self.device = device
+        self.dtype = dtype
+        self.processor = processor
+        self.convert_rgb = convert_rgb
+        self.transform = transform
+        self.image_key = image_key
+
+    def __len__(self):
+        return 0
+
+    def process(self, sample):
+        image: Image.Image = sample[self.image_key]
+        if self.convert_rgb:
+            image = image.convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+
+        task_prompt = self.task_prompt
+        text_input = self.text_inputs
+        prompt = task_prompt
+        if text_input is not None:
+            prompt = task_prompt + text_input
+
+        model_inputs = self.processor(text=prompt, images=image, return_tensors="pt")
+        # streaming e.g.
+        # `pipe:aws s3 cp s3://data/shard-00000.tar --endpoint-url https://00000000000000000000000000000000.r2.cloudflarestorage.com -`
+        # `pipe:aws s3 cp s3://data/shard-00000.tar -`
+        # local e.g.
+        # `shard-00000.tar`
+        url = sample["__url__"]
+        # `pipe:aws s3 cp s3://data/shard-00000.tar`, `pipe:aws s3 cp s3://data/shard-00000.tar -`
+        url = url.split(" --")[0]
+        # `shard-00000.tar`, `shard-00000.tar -`
+        url = url.split("/")[-1]
+        # `shard-00000.tar`
+        url = url.rstrip("-").strip()
+        # `shard-00000`
+        url = url.split(".")[0]
+        model_inputs = {
+            "input_ids": model_inputs["input_ids"],
+            "pixel_values": model_inputs["pixel_values"],
+            "width": image.width,
+            "height": image.height,
+            "path": f"{url}_{sample['__key__']}",
         }
-        for item in batch:
-            for key in batch_inputs:
-                batch_inputs[key].append(item[key])
-        batch_inputs = {
-            key: (
-                torch.cat(value, dim=0) if isinstance(value[0], torch.Tensor) else value
-            )
-            for key, value in batch_inputs.items()
-        }
-        return batch_inputs
+        return model_inputs
+
+    def get(self):
+        return self.dataset.map(self.process)
 
 
 class FlorenceTool:
@@ -230,42 +300,68 @@ class FlorenceTool:
 
     def get_data_loader(
         self,
-        image_paths: List[Union[str, pathlib.Path]],
         task_prompt: TASK_TYPE,
+        image_paths: Optional[List[Union[str, pathlib.Path]]] = None,
+        webdataset_uri: Optional[str] = None,
         text_inputs: Optional[Union[str, List[str]]] = None,
         batch_size: int = 4,
         num_workers: int = 4,
         convert_rgb: bool = True,
+        image_key: str = "jpg",
     ):
+        assert (
+            image_paths or webdataset_uri
+        ), "One of `image_paths` or `webdataset_uri` must be used."
+        assert not (
+            image_paths and webdataset_uri
+        ), "Only one of `image_paths` and `webdataset_uri` can be used."
+        if image_paths:
+            dataset_class = FlorenceDataset
+            parameters = {
+                "images": image_paths,
+                "task_prompt": task_prompt,
+                "device": self.device,
+                "dtype": self.dtype,
+                "processor": self.processor,
+                "text_inputs": text_inputs,
+                "convert_rgb": convert_rgb,
+            }
+        else:
+            dataset_class = FlorenceWebDataset
+            parameters = {
+                "webdataset_uri": webdataset_uri,
+                "task_prompt": task_prompt,
+                "device": self.device,
+                "dtype": self.dtype,
+                "processor": self.processor,
+                "text_inputs": text_inputs,
+                "convert_rgb": convert_rgb,
+                "image_key": image_key,
+            }
         if IS_WINDOWS:
             num_workers = 0
             logging.info("Windows environment: Overriding `num_workers` to 0.")
-        logging.info("Creating FlorenceDataset.")
-        self.dataset = FlorenceDataset(
-            images=image_paths,
-            task_prompt=task_prompt,
-            device=self.device,
-            dtype=self.dtype,
-            processor=self.processor,
-            text_inputs=text_inputs,
-            convert_rgb=convert_rgb,
+        logging.info(f"Creating {dataset_class.__name__}.")
+        self.dataset = dataset_class(**parameters)
+        logging.info(
+            f"{dataset_class.__name__} created - found {len(self.dataset)} images."
         )
-        logging.info(f"FlorenceDataset created - found {len(self.dataset)} images.")
         logging.info("Creating DataLoader.")
         self.dataloader = DataLoader(
-            self.dataset,
+            self.dataset if dataset_class == FlorenceDataset else self.dataset.get(),
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
             persistent_workers=num_workers > 0,
-            collate_fn=FlorenceDataset.collate_fn,
+            collate_fn=collate_fn,
         )
         logging.info("DataLoader created.")
 
     def run_dataloader(
         self,
-        images: List[Union[str, pathlib.Path]],
         task_prompt: TASK_TYPE,
+        images: Optional[List[Union[str, pathlib.Path]]] = None,
+        webdataset_uri: Optional[str] = None,
         text_inputs: Optional[Union[str, List[str]]] = None,
         max_new_tokens: Optional[int] = 1024,
         num_beams: Optional[int] = 3,
@@ -277,7 +373,14 @@ class FlorenceTool:
         suffix: Optional[str] = None,
         overwrite: bool = True,
         convert_rgb: bool = True,
+        image_key: str = "jpg",
     ):
+        assert (
+            images or webdataset_uri
+        ), "One of `images` or `webdataset_uri` must be used."
+        assert not (
+            images and webdataset_uri
+        ), "Only one of `images` and `webdataset_uri` can be used."
         if self.model is None or self.processor is None:
             logging.error("Call `load_model` before `run`.")
             return
@@ -289,12 +392,14 @@ class FlorenceTool:
             images = [images]
 
         self.get_data_loader(
-            image_paths=images,
             task_prompt=task_prompt,
+            image_paths=images,
+            webdataset_uri=webdataset_uri,
             text_inputs=text_inputs,
             batch_size=batch_size,
             num_workers=num_workers,
             convert_rgb=convert_rgb,
+            image_key=image_key,
         )
 
         with tqdm(total=len(self.dataset)) as pbar:
@@ -454,12 +559,46 @@ class FlorenceTool:
             num_workers=num_workers,
         )
 
+    def wds(
+        self,
+        webdataset_uri: str,
+        task: TASK_TYPE,
+        text_input: Optional[str] = None,
+        max_new_tokens: Optional[int] = 1024,
+        num_beams: Optional[int] = 3,
+        batch_size: int = 4,
+        convert_rgb: bool = True,
+        save_result: bool = True,
+        output_format: OUTPUT_TYPE = "json",
+        output_dir: Optional[Union[str, pathlib.Path]] = None,
+        suffix: Optional[str] = None,
+        overwrite: bool = True,
+        num_workers: int = 4,
+        image_key: str = "jpg",
+    ):
+        self.run_dataloader(
+            webdataset_uri=webdataset_uri,
+            task_prompt=task,
+            text_inputs=text_input,
+            max_new_tokens=max_new_tokens,
+            num_beams=num_beams,
+            batch_size=batch_size,
+            save_result=save_result,
+            output_format=output_format,
+            output_dir=output_dir,
+            suffix=suffix,
+            overwrite=overwrite,
+            convert_rgb=convert_rgb,
+            num_workers=num_workers,
+            image_key=image_key,
+        )
+
     def save_to_file(
         self,
         result: Dict[str, Any],
-        image_path: pathlib.Path,
+        image_path: Union[str, pathlib.Path],
         task: TASK_TYPE,
-        output_dir: Optional[Union[str, pathlib.Path]],
+        output_dir: Union[str, pathlib.Path],
         output_format: OUTPUT_TYPE = "json",
         suffix: Optional[str] = None,
         overwrite: bool = True,
@@ -467,8 +606,6 @@ class FlorenceTool:
         assert (
             output_format in OUTPUT_TYPES
         ), f"Expected output_format to be one of {OUTPUT_TYPES}"
-        if output_dir is None:
-            output_dir = image_path.parent
         if isinstance(output_dir, str):
             output_dir = pathlib.Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -476,10 +613,13 @@ class FlorenceTool:
         if suffix is None:
             suffix = task.strip("<>").lower()
 
-        output_file = (
-            output_dir
-            / f"{image_path.stem}-{image_path.suffix}_{suffix}.{output_format}"
-        )
+        if isinstance(image_path, pathlib.Path):
+            output_file = (
+                output_dir
+                / f"{image_path.stem}-{image_path.suffix}_{suffix}.{output_format}"
+            )
+        else:
+            output_file = output_dir / f"{image_path}_{suffix}.{output_format}"
 
         if output_format == "json":
             if output_file.exists() and not overwrite:
