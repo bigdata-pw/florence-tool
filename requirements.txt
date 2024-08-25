@@ -6,3 +6,4 @@ requests
 click
 einops
 timm
+webdataset
