@@ -52,6 +52,7 @@ florence-tool run [OPTIONS]
 - `--task` (required): Task to run (e.g., `"<CAPTION>"`, `"<OD>"`, etc.).
 - `--image`: Path to an image file.
 - `--folder`: Path to a folder containing images.
+- `--wds`: WebDataset.
 - `--output-dir`: Directory to save the results.
 - `--text-input`: Optional text input for tasks that require it.
 - `--max-new-tokens`: Maximum number of new tokens to generate. Default is `1024`.
@@ -63,6 +64,7 @@ florence-tool run [OPTIONS]
 - `--image-extensions`: Comma-separated list of image file extensions to include (e.g., `"jpg,png,jpeg"`). Default is `"jpg,png"`.
 - `--batch-size`: Number of images to process in a batch. Default is `1`.
 - `--num-workers`: Number of Dataloader workers. Default is `4`, overriden to `0` on Windows.
+- `--image-key`: WebDataset image key.
 
 ### Examples
 
@@ -76,6 +78,22 @@ florence-tool run --hf-hub-or-path microsoft/Florence-2-large --task "<CAPTION>"
 
 ```bash
 florence-tool run --hf-hub-or-path microsoft/Florence-2-large --task "<OD>" --folder /path/to/folder/ --output-dir /path/to/output/
+```
+
+#### Processing a WebDataset
+
+```bash
+florence-tool run --hf-hub-or-path microsoft/Florence-2-large --task "<CAPTION>" --wds "shard-{00000..00069}.tar" --output-dir /path/to/output/
+```
+
+#### Processing a WebDataset (streaming)
+
+```bash
+florence-tool run --hf-hub-or-path microsoft/Florence-2-large --task "<CAPTION>" --wds "pipe:aws s3 cp s3://data/shard-{00000..00069}.tar -" --output-dir /path/to/output/
+```
+
+```bash
+florence-tool run --hf-hub-or-path microsoft/Florence-2-large --task "<CAPTION>" --wds "pipe:aws s3 cp s3://data/shard-{00000..00069}.tar --endpoint-url https://00000000000000000000000000000000.r2.cloudflarestorage.com -" --output-dir /path/to/output/
 ```
 
 #### Processing Images Recursively

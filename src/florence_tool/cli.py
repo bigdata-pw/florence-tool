@@ -45,6 +45,11 @@ def cli():
     help="Path to a folder containing images.",
 )
 @click.option(
+    "--wds",
+    type=str,
+    help="WebDataset url.",
+)
+@click.option(
     "--output-dir",
     type=click.Path(exists=True, file_okay=False, path_type=pathlib.Path),
     help="Directory to save the results.",
@@ -87,6 +92,7 @@ def cli():
 )
 @click.option("--batch-size", type=int, default=1, help="Batch size.")
 @click.option("--num-workers", type=int, default=4, help="Dataloader workers.")
+@click.option("--image-key", type=str, default="jpg", help="WebDataset image key.")
 def run(
     hf_hub_or_path: str,
     device: str,
@@ -94,6 +100,7 @@ def run(
     task: str,
     image: Optional[pathlib.Path],
     folder: Optional[pathlib.Path],
+    wds: Optional[str],
     output_dir: Optional[pathlib.Path],
     text_input: str,
     max_new_tokens: int,
@@ -105,6 +112,7 @@ def run(
     image_extensions: str,
     batch_size: int,
     num_workers: int,
+    image_key: str,
 ):
     from florence_tool import FlorenceTool
 
@@ -148,8 +156,26 @@ def run(
             f"Processed images in folder {folder}. Results saved to {output_dir}."
         )
 
+    elif wds:
+        tool.wds(
+            webdataset_uri=wds,
+            task=task,
+            text_input=text_input,
+            max_new_tokens=max_new_tokens,
+            num_beams=num_beams,
+            batch_size=batch_size,
+            output_format=output_format,
+            output_dir=output_dir,
+            suffix=suffix,
+            overwrite=overwrite,
+            num_workers=num_workers,
+            image_key=image_key,
+        )
+
     else:
-        click.echo("Please specify either an image file or a folder of images.")
+        click.echo(
+            "Please specify either an image file, a folder of images or WebDataset url."
+        )
 
     tool.unload_model()
 
