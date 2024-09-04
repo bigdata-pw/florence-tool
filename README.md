@@ -64,6 +64,7 @@ florence-tool run [OPTIONS]
 - `--image-extensions`: Comma-separated list of image file extensions to include (e.g., `"jpg,png,jpeg"`). Default is `"jpg,png"`.
 - `--batch-size`: Number of images to process in a batch. Default is `1`.
 - `--num-workers`: Number of Dataloader workers. Default is `4`, overriden to `0` on Windows.
+- `--prefetch-factor`: Prefetch factor for Dataloader workers. Default is `4`.
 - `--image-key`: WebDataset image key.
 
 ### Examples

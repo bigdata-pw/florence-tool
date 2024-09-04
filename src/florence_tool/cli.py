@@ -92,6 +92,9 @@ def cli():
 )
 @click.option("--batch-size", type=int, default=1, help="Batch size.")
 @click.option("--num-workers", type=int, default=4, help="Dataloader workers.")
+@click.option(
+    "--prefetch-factor", type=int, default=4, help="Dataloader prefetch factor."
+)
 @click.option("--image-key", type=str, default="jpg", help="WebDataset image key.")
 def run(
     hf_hub_or_path: str,
@@ -112,6 +115,7 @@ def run(
     image_extensions: str,
     batch_size: int,
     num_workers: int,
+    prefetch_factor: int,
     image_key: str,
 ):
     from florence_tool import FlorenceTool
@@ -151,6 +155,7 @@ def run(
             image_extensions=extensions,
             batch_size=batch_size,
             num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
         )
         click.echo(
             f"Processed images in folder {folder}. Results saved to {output_dir}."
@@ -169,6 +174,7 @@ def run(
             suffix=suffix,
             overwrite=overwrite,
             num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
             image_key=image_key,
         )
 
