@@ -306,6 +306,7 @@ class FlorenceTool:
         text_inputs: Optional[Union[str, List[str]]] = None,
         batch_size: int = 4,
         num_workers: int = 4,
+        prefetch_factor: int = 4,
         convert_rgb: bool = True,
         image_key: str = "jpg",
     ):
@@ -353,6 +354,7 @@ class FlorenceTool:
             shuffle=False,
             num_workers=num_workers,
             persistent_workers=num_workers > 0,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
             collate_fn=collate_fn,
         )
         logging.info("DataLoader created.")
@@ -367,6 +369,7 @@ class FlorenceTool:
         num_beams: Optional[int] = 3,
         batch_size: int = 4,
         num_workers: int = 4,
+        prefetch_factor: int = 4,
         save_result: bool = True,
         output_format: OUTPUT_TYPE = "json",
         output_dir: Optional[Union[str, pathlib.Path]] = None,
@@ -398,6 +401,7 @@ class FlorenceTool:
             text_inputs=text_inputs,
             batch_size=batch_size,
             num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
             convert_rgb=convert_rgb,
             image_key=image_key,
         )
@@ -531,6 +535,7 @@ class FlorenceTool:
         suffix: Optional[str] = None,
         overwrite: bool = True,
         num_workers: int = 4,
+        prefetch_factor: int = 4,
     ):
         if isinstance(folder_path, str):
             folder_path = pathlib.Path(folder_path)
@@ -557,6 +562,7 @@ class FlorenceTool:
             overwrite=overwrite,
             convert_rgb=convert_rgb,
             num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
         )
 
     def wds(
@@ -574,6 +580,7 @@ class FlorenceTool:
         suffix: Optional[str] = None,
         overwrite: bool = True,
         num_workers: int = 4,
+        prefetch_factor: int = 4,
         image_key: str = "jpg",
     ):
         self.run_dataloader(
@@ -590,6 +597,7 @@ class FlorenceTool:
             overwrite=overwrite,
             convert_rgb=convert_rgb,
             num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
             image_key=image_key,
         )
 
