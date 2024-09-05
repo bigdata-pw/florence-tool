@@ -66,6 +66,7 @@ florence-tool run [OPTIONS]
 - `--num-workers`: Number of Dataloader workers. Default is `4`, overriden to `0` on Windows.
 - `--prefetch-factor`: Prefetch factor for Dataloader workers. Default is `4`.
 - `--image-key`: WebDataset image key.
+- `--no-check`: Skips task type check for models with added task types - task will be processed as the default `pure_text` type. This is intended for testing purposes, new task types can be added to the check, just create an issue or PR.
 
 ### Examples
 
@@ -151,6 +152,19 @@ florence-tool run --hf-hub-or-path microsoft/Florence-2-large --task "<CAPTION>"
 <REGION_TO_DESCRIPTION>
 <REGION_TO_OCR>
 <REGION_PROPOSAL>
+```
+
+#### Third Party Task Types
+
+Supported by [`MiaoshouAI/Florence-2-base-PromptGen-v1.5`](https://huggingface.co/MiaoshouAI/Florence-2-base-PromptGen-v1.5)
+```
+<GENERATE_TAGS>
+<MIXED_CAPTION>
+```
+
+Supported by [`MiaoshouAI/Florence-2-base-PromptGen`](https://huggingface.co/MiaoshouAI/Florence-2-base-PromptGen)
+```
+<GENERATE_PROMPT>
 ```
 
 ### Development
