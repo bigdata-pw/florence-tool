@@ -96,6 +96,7 @@ def cli():
     "--prefetch-factor", type=int, default=4, help="Dataloader prefetch factor."
 )
 @click.option("--image-key", type=str, default="jpg", help="WebDataset image key.")
+@click.option("--no-check", is_flag=True, help="Skip task type check.")
 def run(
     hf_hub_or_path: str,
     device: str,
@@ -117,12 +118,18 @@ def run(
     num_workers: int,
     prefetch_factor: int,
     image_key: str,
+    no_check: bool,
 ):
     from florence_tool import FlorenceTool
 
     extensions = image_extensions.split(",")
 
-    tool = FlorenceTool(hf_hub_or_path=hf_hub_or_path, device=device, dtype=dtype)
+    tool = FlorenceTool(
+        hf_hub_or_path=hf_hub_or_path,
+        device=device,
+        dtype=dtype,
+        check_task_types=not no_check,
+    )
 
     tool.load_model()
 

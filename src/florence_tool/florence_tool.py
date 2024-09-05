@@ -24,7 +24,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-TASK_TYPES = [
+ORIGINAL_TASK_TYPES = [
     "<OCR>",
     "<OCR_WITH_REGION>",
     "<CAPTION>",
@@ -42,12 +42,23 @@ TASK_TYPES = [
     "<REGION_PROPOSAL>",
 ]
 
+THIRD_PARTY_TASK_TYPES = [
+    "<GENERATE_TAGS>",
+    "<MIXED_CAPTION>",
+    "<GENERATE_PROMPT>",
+]
+
+TASK_TYPES = ORIGINAL_TASK_TYPES + THIRD_PARTY_TASK_TYPES
+
 TASK_TYPE = Literal[
     "<OCR>",
     "<OCR_WITH_REGION>",
     "<CAPTION>",
     "<DETAILED_CAPTION>",
     "<MORE_DETAILED_CAPTION>",
+    "<GENERATE_TAGS>",
+    "<MIXED_CAPTION>",
+    "<GENERATE_PROMPT>",
     "<OD>",
     "<DENSE_REGION_CAPTION>",
     "<CAPTION_TO_PHRASE_GROUNDING>",
@@ -219,6 +230,7 @@ class FlorenceTool:
         device: Union[str, torch.device],
         dtype: Union[str, torch.dtype],
         max_workers: int = 8,
+        check_task_types: bool = True,
     ) -> None:
         self.set_device(device)
         self.set_dtype(dtype)
@@ -231,6 +243,7 @@ class FlorenceTool:
         self.post_process_futures: List[Future] = []
         self.dataloader = None
         self.dataset = None
+        self.check_task_types = check_task_types
         logging.info(
             f"Initialized\n- hf_hub_or_path: {self.hf_hub_or_path}\n- device: {self.device}\n- dtype: {self.dtype}"
         )
@@ -387,9 +400,10 @@ class FlorenceTool:
         if self.model is None or self.processor is None:
             logging.error("Call `load_model` before `run`.")
             return
-        assert (
-            task_prompt in TASK_TYPES
-        ), f"{task_prompt} is not supported. Expected one of {TASK_TYPES}."
+        if self.check_task_types:
+            assert (
+                task_prompt in TASK_TYPES
+            ), f"{task_prompt} is not supported. Expected one of {TASK_TYPES}."
 
         if isinstance(images, Image.Image):
             images = [images]
@@ -451,9 +465,10 @@ class FlorenceTool:
         if self.model is None or self.processor is None:
             logging.error("Call `load_model` before `run`.")
             return
-        assert (
-            task_prompt in TASK_TYPES
-        ), f"{task_prompt} is not supported. Expected one of {TASK_TYPES}."
+        if self.check_task_types:
+            assert (
+                task_prompt in TASK_TYPES
+            ), f"{task_prompt} is not supported. Expected one of {TASK_TYPES}."
 
         prompt = task_prompt
         if text_input is not None:
