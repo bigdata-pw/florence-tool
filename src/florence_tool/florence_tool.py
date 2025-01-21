@@ -447,8 +447,8 @@ class FlorenceTool:
     def run(
         self,
         image: Image.Image,
-        task_prompt: TASK_TYPE,
-        text_input: Optional[str] = None,
+        task_prompt: Union[List[TASK_TYPE], TASK_TYPE],
+        text_input: Optional[Union[List[str], str]] = None,
         max_new_tokens: Optional[int] = 1024,
         num_beams: Optional[int] = 3,
     ):
@@ -465,34 +465,59 @@ class FlorenceTool:
         if self.model is None or self.processor is None:
             logging.error("Call `load_model` before `run`.")
             return
+
+        if not isinstance(task_prompt, list):
+            task_prompt = [task_prompt]
+        if not isinstance(text_input, list):
+            text_input = [text_input] * len(task_prompt)
+        assert len(task_prompt) == len(
+            text_input
+        ), f"Expected `task_prompt` ({len(task_prompt)}) and `text_input` ({len(text_input)}) to have the same length."
+
         if self.check_task_types:
-            assert (
-                task_prompt in TASK_TYPES
-            ), f"{task_prompt} is not supported. Expected one of {TASK_TYPES}."
+            for _task_prompt in task_prompt:
+                assert (
+                    _task_prompt in TASK_TYPES
+                ), f"{_task_prompt} is not supported. Expected one of {TASK_TYPES}."
 
-        prompt = task_prompt
-        if text_input is not None:
-            prompt = task_prompt + text_input
+        pixel_values = self.processor.image_processor(
+            images=image, return_tensors="pt"
+        )["pixel_values"].to(self.device, self.dtype)
+        image_features = self.model._encode_image(pixel_values)
 
-        inputs = self.processor(text=prompt, images=image, return_tensors="pt")
+        parsed_answers = {}
+        for _task_prompt, _text_input in zip(task_prompt, text_input):
+            prompt = _task_prompt
+            if _text_input is not None:
+                prompt = _task_prompt + _text_input
 
-        generated_ids = self.model.generate(
-            input_ids=inputs["input_ids"].to(self.device),
-            pixel_values=inputs["pixel_values"].to(self.device, self.dtype),
-            max_new_tokens=max_new_tokens,
-            num_beams=num_beams,
-        )
+            input_ids = self.processor.tokenizer(
+                text=self.processor._construct_prompts([prompt]), return_tensors="pt"
+            )["input_ids"].to(self.device)
+            inputs_embeds = self.model.get_input_embeddings()(input_ids)
+            inputs_embeds, attention_mask = (
+                self.model._merge_input_ids_with_image_features(
+                    image_features, inputs_embeds
+                )
+            )
 
-        generated_text = self.processor.batch_decode(
-            generated_ids, skip_special_tokens=False
-        )[0]
+            generated_ids = self.model.generate(
+                inputs_embeds=inputs_embeds,
+                max_new_tokens=max_new_tokens,
+                num_beams=num_beams,
+            )
 
-        parsed_answer = self.processor.post_process_generation(
-            generated_text,
-            task=task_prompt,
-            image_size=(image.width, image.height),
-        )
-        return parsed_answer
+            generated_text = self.processor.batch_decode(
+                generated_ids, skip_special_tokens=False
+            )[0]
+
+            parsed_answer = self.processor.post_process_generation(
+                generated_text,
+                task=_task_prompt,
+                image_size=(image.width, image.height),
+            )
+            parsed_answers.update(parsed_answer)
+        return parsed_answers
 
     def file(
         self,
